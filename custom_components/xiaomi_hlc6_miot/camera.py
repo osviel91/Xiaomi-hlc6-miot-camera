@@ -1,0 +1,162 @@
+"""Camera platform for Xiaomi isa.camera.hlc6 via Xiaomi Miot action URLs.
+
+This is a narrow proof-of-concept for cameras where Xiaomi Miot Auto can call
+MIOT stream actions but its generic CameraEntity stays unavailable.
+"""
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta
+import logging
+from typing import Any
+
+import voluptuous as vol
+
+from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.const import CONF_NAME
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+import homeassistant.helpers.config_validation as cv
+
+_LOGGER = logging.getLogger(__name__)
+
+CONF_MIOT_ENTITY = "miot_entity"
+CONF_QUALITY = "quality"
+CONF_ENABLE_STREAM = "enable_stream"
+
+DEFAULT_NAME = "Xiaomi HLC6 Camera"
+DEFAULT_QUALITY = 0  # 0 Auto, 1 1080p, 2 640x360
+
+PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
+    {
+        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
+        vol.Required(CONF_MIOT_ENTITY): cv.entity_id,
+        vol.Optional(CONF_QUALITY, default=DEFAULT_QUALITY): vol.In([0, 1, 2]),
+        vol.Optional(CONF_ENABLE_STREAM, default=True): cv.boolean,
+    }
+)
+
+
+def setup_platform(hass: HomeAssistant, config: dict[str, Any], add_entities, discovery_info=None) -> None:
+    """Set up the YAML camera platform."""
+    add_entities([
+        XiaomiHlc6MiotCamera(
+            hass=hass,
+            name=config[CONF_NAME],
+            miot_entity=config[CONF_MIOT_ENTITY],
+            quality=config[CONF_QUALITY],
+            enable_stream=config[CONF_ENABLE_STREAM],
+        )
+    ])
+
+
+class XiaomiHlc6MiotCamera(Camera):
+    """Camera entity backed by Xiaomi Miot HLS/RTSP action outputs."""
+
+    def __init__(self, hass: HomeAssistant, name: str, miot_entity: str, quality: int, enable_stream: bool) -> None:
+        super().__init__()
+        self.hass = hass
+        self._attr_name = name
+        self._attr_unique_id = f"xiaomi_hlc6_miot_{miot_entity}"
+        self._miot_entity = miot_entity
+        self._quality = quality
+        self._enable_stream = enable_stream
+        self._rtsp_url: str | None = None
+        self._snapshot_url: str | None = None
+        self._hls_url: str | None = None
+        self._expires_at: datetime | None = None
+        if enable_stream:
+            self._attr_supported_features = CameraEntityFeature.STREAM
+        else:
+            self._attr_supported_features = 0
+
+    @property
+    def available(self) -> bool:
+        # The backing Xiaomi Miot camera entity may be unavailable even when
+        # actions on button.isa_hlc6_0e54_info work. Keep this entity available.
+        return True
+
+    async def _call_miot_action(self, siid: int, aiid: int, params: list[Any] | None = None) -> dict[str, Any]:
+        """Call Xiaomi Miot Auto's action service and return its response."""
+        data = {
+            "entity_id": self._miot_entity,
+            "siid": siid,
+            "aiid": aiid,
+            "params": params or [],
+        }
+        try:
+            response = await self.hass.services.async_call(
+                "xiaomi_miot",
+                "call_action",
+                data,
+                blocking=True,
+                return_response=True,
+            )
+        except TypeError:
+            # Older HA fallback: no return_response support means this custom
+            # platform cannot get the generated URL.
+            _LOGGER.exception("Home Assistant service call does not support return_response")
+            return {}
+        except Exception:
+            _LOGGER.exception("Failed to call Xiaomi Miot action siid=%s aiid=%s", siid, aiid)
+            return {}
+
+        if isinstance(response, dict):
+            # REST wraps it as {service_response: {...}}; internal async_call may
+            # return either that wrapper or the direct service response.
+            return response.get("service_response") or response
+        return {}
+
+    async def _refresh_urls(self) -> None:
+        """Refresh cached RTSP/HLS/snapshot URLs from MIOT actions."""
+        now = datetime.utcnow()
+        if self._expires_at and now < self._expires_at - timedelta(seconds=20):
+            return
+
+        # HLS / Google stream: siid=5 aiid=1 input [quality], output [url].
+        hls = await self._call_miot_action(5, 1, [self._quality])
+        if hls.get("code") == 0 and hls.get("out"):
+            self._hls_url = hls["out"][0]
+            _LOGGER.debug("Obtained HLS URL for %s", self.name)
+        else:
+            _LOGGER.debug("HLS action failed/empty for %s: %s", self.name, hls)
+
+        # RTSP / Alexa stream: siid=4 aiid=1 input [quality], output [rtsp, snapshot, expiration_ms].
+        rtsp = await self._call_miot_action(4, 1, [self._quality])
+        if rtsp.get("code") == 0 and rtsp.get("out"):
+            out = rtsp["out"]
+            self._rtsp_url = out[0] if len(out) > 0 else None
+            self._snapshot_url = out[1] if len(out) > 1 else None
+            if len(out) > 2 and isinstance(out[2], (int, float)):
+                self._expires_at = datetime.utcfromtimestamp(out[2] / 1000)
+            else:
+                self._expires_at = now + timedelta(seconds=60)
+            _LOGGER.debug("Obtained RTSP/snapshot URLs for %s; expires at %s", self.name, self._expires_at)
+        else:
+            _LOGGER.warning("RTSP action failed/empty for %s: %s", self.name, rtsp)
+            self._expires_at = now + timedelta(seconds=20)
+
+    async def stream_source(self) -> str | None:
+        """Return a stream URL for Home Assistant stream integration."""
+        if not self._enable_stream:
+            return None
+        await self._refresh_urls()
+        # In tests HLS returned 404 from outside HA, while RTSP returned a URL.
+        # Prefer RTSP for HA/FFmpeg, fall back to HLS.
+        return self._rtsp_url or self._hls_url
+
+    async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
+        """Return latest snapshot bytes."""
+        await self._refresh_urls()
+        if not self._snapshot_url:
+            return None
+        session = async_get_clientsession(self.hass)
+        try:
+            async with session.get(self._snapshot_url, timeout=15) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning("Snapshot URL returned HTTP %s", resp.status)
+                    return None
+                return await resp.read()
+        except (asyncio.TimeoutError, Exception):
+            _LOGGER.exception("Failed to fetch Xiaomi HLC6 snapshot")
+            return None
