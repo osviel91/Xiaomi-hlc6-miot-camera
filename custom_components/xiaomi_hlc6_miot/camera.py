@@ -33,6 +33,7 @@ DEFAULT_NAME = "Xiaomi HLC6 Camera"
 DEFAULT_ENABLE_STREAM = False
 DEFAULT_ENABLE_STREAM_SNAPSHOT = False
 DEFAULT_STREAM_SNAPSHOT_CACHE_SECONDS = 600
+HLS_FRAME_CAPTURE_ATTEMPTS = 3
 PLACEHOLDER_SNAPSHOT_MARKERS = ("developer_15414679054o4iwtfd.png",)
 # For isa.camera.hlc6, quality 0/auto can produce an empty HLS playlist and
 # RTSP fails in Home Assistant's stream worker. Quality 2 returns a valid H.264
@@ -192,53 +193,64 @@ class XiaomiHlc6MiotCamera(Camera):
         ):
             return self._last_image
 
-        hls = await self._call_miot_action(5, 1, [HLS_STREAM_QUALITY])
-        if hls.get("code") != 0 or not hls.get("out"):
-            _LOGGER.warning("HLS action failed/empty for frame snapshot on %s: %s", self.name, hls)
-            return None
+        last_error = ""
+        for attempt in range(1, HLS_FRAME_CAPTURE_ATTEMPTS + 1):
+            hls = await self._call_miot_action(5, 1, [HLS_STREAM_QUALITY])
+            if hls.get("code") != 0 or not hls.get("out"):
+                last_error = f"HLS action failed/empty: {hls}"
+                _LOGGER.debug("%s for frame snapshot on %s", last_error, self.name)
+                await asyncio.sleep(1)
+                continue
 
-        hls_url = hls["out"][0]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                hls_url,
-                "-frames:v",
-                "1",
-                "-f",
-                "image2pipe",
-                "-vcodec",
-                "mjpeg",
-                "pipe:1",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError:
-            _LOGGER.warning("ffmpeg is not installed; cannot capture HLS frame snapshot for %s", self.name)
-            return None
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            _LOGGER.warning("Timed out capturing HLS frame snapshot for %s", self.name)
-            return None
+            hls_url = hls["out"][0]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    hls_url,
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "image2pipe",
+                    "-vcodec",
+                    "mjpeg",
+                    "pipe:1",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                _LOGGER.warning("ffmpeg is not installed; cannot capture HLS frame snapshot for %s", self.name)
+                return self._last_image
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                last_error = "ffmpeg timed out"
+                _LOGGER.debug("%s capturing HLS frame snapshot for %s", last_error, self.name)
+                await asyncio.sleep(1)
+                continue
 
-        if proc.returncode != 0 or not stdout:
-            _LOGGER.warning(
-                "ffmpeg failed capturing HLS frame snapshot for %s: rc=%s stderr=%s",
+            if proc.returncode == 0 and stdout:
+                self._last_image = stdout
+                self._last_image_at = now
+                return stdout
+
+            last_error = f"ffmpeg rc={proc.returncode} stderr={stderr.decode(errors='ignore')[:500]}"
+            _LOGGER.debug(
+                "Attempt %s/%s failed capturing HLS frame snapshot for %s: %s",
+                attempt,
+                HLS_FRAME_CAPTURE_ATTEMPTS,
                 self.name,
-                proc.returncode,
-                stderr.decode(errors="ignore")[:500],
+                last_error,
             )
-            return None
+            await asyncio.sleep(1)
 
-        self._last_image = stdout
-        self._last_image_at = now
-        return stdout
+        _LOGGER.warning("Failed capturing HLS frame snapshot for %s after retries: %s", self.name, last_error)
+        return self._last_image
 
     async def stream_source(self) -> str | None:
         """Return a stream URL for Home Assistant stream integration."""
