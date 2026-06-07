@@ -25,9 +25,13 @@ CONF_QUALITY = "quality"
 CONF_ENABLE_STREAM = "enable_stream"
 
 DEFAULT_NAME = "Xiaomi HLC6 Camera"
+# Keep live streaming disabled by default. Requesting a live stream makes Xiaomi
+# Home report that someone is viewing the camera and HA's stream worker can hang
+# on this model; snapshots do not need the HLS live-view action.
+DEFAULT_ENABLE_STREAM = False
 # For isa.camera.hlc6, quality 0/auto can produce an empty HLS playlist and
 # RTSP fails in Home Assistant's stream worker. Quality 2 returns a valid H.264
-# HLS stream in observed tests.
+# HLS stream in observed tests if enable_stream is explicitly turned on.
 DEFAULT_QUALITY = 2  # 0 Auto, 1 1080p, 2 640x360
 HLS_STREAM_QUALITY = 2
 
@@ -36,7 +40,7 @@ PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
         vol.Required(CONF_MIOT_ENTITY): cv.entity_id,
         vol.Optional(CONF_QUALITY, default=DEFAULT_QUALITY): vol.In([0, 1, 2]),
-        vol.Optional(CONF_ENABLE_STREAM, default=True): cv.boolean,
+        vol.Optional(CONF_ENABLE_STREAM, default=DEFAULT_ENABLE_STREAM): cv.boolean,
     }
 )
 
