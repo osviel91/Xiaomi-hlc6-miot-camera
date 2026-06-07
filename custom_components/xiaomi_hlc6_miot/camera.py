@@ -24,6 +24,7 @@ CONF_MIOT_ENTITY = "miot_entity"
 CONF_QUALITY = "quality"
 CONF_ENABLE_STREAM = "enable_stream"
 CONF_ENABLE_STREAM_SNAPSHOT = "enable_stream_snapshot"
+CONF_STREAM_SNAPSHOT_CACHE_SECONDS = "stream_snapshot_cache_seconds"
 
 DEFAULT_NAME = "Xiaomi HLC6 Camera"
 # Keep live streaming disabled by default. Requesting a live stream makes Xiaomi
@@ -31,7 +32,7 @@ DEFAULT_NAME = "Xiaomi HLC6 Camera"
 # on this model; snapshots do not need the HLS live-view action.
 DEFAULT_ENABLE_STREAM = False
 DEFAULT_ENABLE_STREAM_SNAPSHOT = False
-SNAPSHOT_CACHE_SECONDS = 60
+DEFAULT_STREAM_SNAPSHOT_CACHE_SECONDS = 600
 PLACEHOLDER_SNAPSHOT_MARKERS = ("developer_15414679054o4iwtfd.png",)
 # For isa.camera.hlc6, quality 0/auto can produce an empty HLS playlist and
 # RTSP fails in Home Assistant's stream worker. Quality 2 returns a valid H.264
@@ -46,6 +47,10 @@ PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_QUALITY, default=DEFAULT_QUALITY): vol.In([0, 1, 2]),
         vol.Optional(CONF_ENABLE_STREAM, default=DEFAULT_ENABLE_STREAM): cv.boolean,
         vol.Optional(CONF_ENABLE_STREAM_SNAPSHOT, default=DEFAULT_ENABLE_STREAM_SNAPSHOT): cv.boolean,
+        vol.Optional(
+            CONF_STREAM_SNAPSHOT_CACHE_SECONDS,
+            default=DEFAULT_STREAM_SNAPSHOT_CACHE_SECONDS,
+        ): vol.All(vol.Coerce(int), vol.Range(min=10, max=3600)),
     }
 )
 
@@ -60,6 +65,7 @@ def setup_platform(hass: HomeAssistant, config: dict[str, Any], add_entities, di
             quality=config[CONF_QUALITY],
             enable_stream=config[CONF_ENABLE_STREAM],
             enable_stream_snapshot=config[CONF_ENABLE_STREAM_SNAPSHOT],
+            stream_snapshot_cache_seconds=config[CONF_STREAM_SNAPSHOT_CACHE_SECONDS],
         )
     ])
 
@@ -75,6 +81,7 @@ class XiaomiHlc6MiotCamera(Camera):
         quality: int,
         enable_stream: bool,
         enable_stream_snapshot: bool,
+        stream_snapshot_cache_seconds: int,
     ) -> None:
         super().__init__()
         self.hass = hass
@@ -84,6 +91,7 @@ class XiaomiHlc6MiotCamera(Camera):
         self._quality = quality
         self._enable_stream = enable_stream
         self._enable_stream_snapshot = enable_stream_snapshot
+        self._stream_snapshot_cache_seconds = stream_snapshot_cache_seconds
         self._rtsp_url: str | None = None
         self._snapshot_url: str | None = None
         self._hls_url: str | None = None
@@ -146,7 +154,7 @@ class XiaomiHlc6MiotCamera(Camera):
             self._hls_url = None
             self._rtsp_url = None
             self._snapshot_url = None
-            self._expires_at = now + timedelta(seconds=SNAPSHOT_CACHE_SECONDS)
+            self._expires_at = now + timedelta(seconds=self._stream_snapshot_cache_seconds)
             return
 
         # HLS / Google stream: siid=5 aiid=1 input [quality], output [url].
@@ -180,7 +188,7 @@ class XiaomiHlc6MiotCamera(Camera):
         if (
             self._last_image
             and self._last_image_at
-            and now < self._last_image_at + timedelta(seconds=SNAPSHOT_CACHE_SECONDS)
+            and now < self._last_image_at + timedelta(seconds=self._stream_snapshot_cache_seconds)
         ):
             return self._last_image
 

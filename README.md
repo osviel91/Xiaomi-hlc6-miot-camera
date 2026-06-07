@@ -46,6 +46,7 @@ camera:
     quality: 2
     enable_stream: false
     enable_stream_snapshot: false
+    stream_snapshot_cache_seconds: 600
 ```
 
 Quality values:
@@ -66,11 +67,14 @@ camera:
     quality: 2
     enable_stream: false
     enable_stream_snapshot: true
+    stream_snapshot_cache_seconds: 600
 ```
 
 `enable_stream_snapshot: true` requires `ffmpeg` in the Home Assistant runtime
 and can make Xiaomi Home notify that someone is viewing the livestream. Captured
-frames are cached for 60 seconds to reduce repeated stream starts.
+frames are cached for `stream_snapshot_cache_seconds` seconds to reduce repeated
+stream starts. The default is 600 seconds (10 minutes); allowed values are
+10-3600 seconds.
 
 ## Notes
 
