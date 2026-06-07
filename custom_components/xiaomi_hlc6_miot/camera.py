@@ -76,7 +76,7 @@ class XiaomiHlc6MiotCamera(Camera):
         if enable_stream:
             self._attr_supported_features = CameraEntityFeature.STREAM
         else:
-            self._attr_supported_features = 0
+            self._attr_supported_features = CameraEntityFeature(0)
 
     @property
     def available(self) -> bool:
