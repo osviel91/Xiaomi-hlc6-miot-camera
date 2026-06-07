@@ -121,15 +121,18 @@ class XiaomiHlc6MiotCamera(Camera):
         if self._expires_at and now < self._expires_at - timedelta(seconds=20):
             return
 
-        # HLS / Google stream: siid=5 aiid=1 input [quality], output [url].
-        # Always request quality 2 for HLS because quality 0/auto can return an
-        # empty playlist on isa.camera.hlc6 even if YAML still has quality: 0.
-        hls = await self._call_miot_action(5, 1, [HLS_STREAM_QUALITY])
-        if hls.get("code") == 0 and hls.get("out"):
-            self._hls_url = hls["out"][0]
-            _LOGGER.debug("Obtained HLS URL for %s", self.name)
+        if self._enable_stream:
+            # HLS / Google stream: siid=5 aiid=1 input [quality], output [url].
+            # Always request quality 2 for HLS because quality 0/auto can return an
+            # empty playlist on isa.camera.hlc6 even if YAML still has quality: 0.
+            hls = await self._call_miot_action(5, 1, [HLS_STREAM_QUALITY])
+            if hls.get("code") == 0 and hls.get("out"):
+                self._hls_url = hls["out"][0]
+                _LOGGER.debug("Obtained HLS URL for %s", self.name)
+            else:
+                _LOGGER.debug("HLS action failed/empty for %s: %s", self.name, hls)
         else:
-            _LOGGER.debug("HLS action failed/empty for %s: %s", self.name, hls)
+            self._hls_url = None
 
         # RTSP / Alexa stream: siid=4 aiid=1 input [quality], output [rtsp, snapshot, expiration_ms].
         rtsp = await self._call_miot_action(4, 1, [self._quality])
