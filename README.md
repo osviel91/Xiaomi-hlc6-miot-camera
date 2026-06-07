@@ -76,6 +76,16 @@ frames are cached for `stream_snapshot_cache_seconds` seconds to reduce repeated
 stream starts. The default is 600 seconds (10 minutes); allowed values are
 10-3600 seconds.
 
+To refresh immediately from Lovelace or an automation, call:
+
+```yaml
+service: homeassistant.update_entity
+target:
+  entity_id: camera.camara_xiaomi_hlc6_prueba
+```
+
+This clears the cached frame and captures a new one on demand.
+
 ## Notes
 
 This integration does not implement Xiaomi login. It depends on Xiaomi Miot Auto's existing authenticated service calls.

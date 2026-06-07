@@ -252,6 +252,13 @@ class XiaomiHlc6MiotCamera(Camera):
         _LOGGER.warning("Failed capturing HLS frame snapshot for %s after retries: %s", self.name, last_error)
         return self._last_image
 
+    async def async_update(self) -> None:
+        """Force-refresh the cached camera image when HA updates the entity."""
+        self._last_image = None
+        self._last_image_at = None
+        if self._enable_stream_snapshot:
+            await self._async_hls_frame_image()
+
     async def stream_source(self) -> str | None:
         """Return a stream URL for Home Assistant stream integration."""
         if not self._enable_stream:
