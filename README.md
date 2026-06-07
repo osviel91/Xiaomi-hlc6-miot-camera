@@ -13,7 +13,10 @@ Experimental. Built specifically after testing one `isa.camera.hlc6` camera wher
 - Direct MIOT actions returned:
   - HLS URL via `siid=5`, `aiid=1`.
   - RTSP URL + snapshot URL via `siid=4`, `aiid=1`.
-  - Snapshot URL responded as `image/png`.
+  - The Alexa snapshot URL responds as `image/png`, but on the tested HLC6 it is
+    a generic "Works with Mi Home" placeholder rather than a real still image.
+  - Capturing one frame from HLS quality `2` returns a real image, but it starts
+    the livestream and may trigger Xiaomi Home's live-view notification.
 
 ## Requirements
 
@@ -40,8 +43,9 @@ camera:
   - platform: xiaomi_hlc6_miot
     name: Cámara Xiaomi HLC6 prueba
     miot_entity: button.isa_hlc6_0e54_info
-    quality: 0
-    enable_stream: true
+    quality: 2
+    enable_stream: false
+    enable_stream_snapshot: false
 ```
 
 Quality values:
@@ -50,16 +54,23 @@ Quality values:
 - `1`: 1080p 20 fps
 - `2`: 640x360 20 fps
 
-If stream does not work, try snapshot-only mode:
+Default privacy-first mode does not call Xiaomi stream actions and will not show
+the generic placeholder image. To generate a real still image by briefly opening
+the HLS stream, opt in explicitly:
 
 ```yaml
 camera:
   - platform: xiaomi_hlc6_miot
     name: Cámara Xiaomi HLC6 prueba
     miot_entity: button.isa_hlc6_0e54_info
-    quality: 0
+    quality: 2
     enable_stream: false
+    enable_stream_snapshot: true
 ```
+
+`enable_stream_snapshot: true` requires `ffmpeg` in the Home Assistant runtime
+and can make Xiaomi Home notify that someone is viewing the livestream. Captured
+frames are cached for 60 seconds to reduce repeated stream starts.
 
 ## Notes
 

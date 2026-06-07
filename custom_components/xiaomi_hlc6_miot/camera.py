@@ -23,12 +23,16 @@ _LOGGER = logging.getLogger(__name__)
 CONF_MIOT_ENTITY = "miot_entity"
 CONF_QUALITY = "quality"
 CONF_ENABLE_STREAM = "enable_stream"
+CONF_ENABLE_STREAM_SNAPSHOT = "enable_stream_snapshot"
 
 DEFAULT_NAME = "Xiaomi HLC6 Camera"
 # Keep live streaming disabled by default. Requesting a live stream makes Xiaomi
 # Home report that someone is viewing the camera and HA's stream worker can hang
 # on this model; snapshots do not need the HLS live-view action.
 DEFAULT_ENABLE_STREAM = False
+DEFAULT_ENABLE_STREAM_SNAPSHOT = False
+SNAPSHOT_CACHE_SECONDS = 60
+PLACEHOLDER_SNAPSHOT_MARKERS = ("developer_15414679054o4iwtfd.png",)
 # For isa.camera.hlc6, quality 0/auto can produce an empty HLS playlist and
 # RTSP fails in Home Assistant's stream worker. Quality 2 returns a valid H.264
 # HLS stream in observed tests if enable_stream is explicitly turned on.
@@ -41,6 +45,7 @@ PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
         vol.Required(CONF_MIOT_ENTITY): cv.entity_id,
         vol.Optional(CONF_QUALITY, default=DEFAULT_QUALITY): vol.In([0, 1, 2]),
         vol.Optional(CONF_ENABLE_STREAM, default=DEFAULT_ENABLE_STREAM): cv.boolean,
+        vol.Optional(CONF_ENABLE_STREAM_SNAPSHOT, default=DEFAULT_ENABLE_STREAM_SNAPSHOT): cv.boolean,
     }
 )
 
@@ -54,6 +59,7 @@ def setup_platform(hass: HomeAssistant, config: dict[str, Any], add_entities, di
             miot_entity=config[CONF_MIOT_ENTITY],
             quality=config[CONF_QUALITY],
             enable_stream=config[CONF_ENABLE_STREAM],
+            enable_stream_snapshot=config[CONF_ENABLE_STREAM_SNAPSHOT],
         )
     ])
 
@@ -61,7 +67,15 @@ def setup_platform(hass: HomeAssistant, config: dict[str, Any], add_entities, di
 class XiaomiHlc6MiotCamera(Camera):
     """Camera entity backed by Xiaomi Miot HLS/RTSP action outputs."""
 
-    def __init__(self, hass: HomeAssistant, name: str, miot_entity: str, quality: int, enable_stream: bool) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        name: str,
+        miot_entity: str,
+        quality: int,
+        enable_stream: bool,
+        enable_stream_snapshot: bool,
+    ) -> None:
         super().__init__()
         self.hass = hass
         self._attr_name = name
@@ -69,10 +83,13 @@ class XiaomiHlc6MiotCamera(Camera):
         self._miot_entity = miot_entity
         self._quality = quality
         self._enable_stream = enable_stream
+        self._enable_stream_snapshot = enable_stream_snapshot
         self._rtsp_url: str | None = None
         self._snapshot_url: str | None = None
         self._hls_url: str | None = None
         self._expires_at: datetime | None = None
+        self._last_image: bytes | None = None
+        self._last_image_at: datetime | None = None
         if enable_stream:
             self._attr_supported_features = CameraEntityFeature.STREAM
         else:
@@ -121,18 +138,26 @@ class XiaomiHlc6MiotCamera(Camera):
         if self._expires_at and now < self._expires_at - timedelta(seconds=20):
             return
 
-        if self._enable_stream:
-            # HLS / Google stream: siid=5 aiid=1 input [quality], output [url].
-            # Always request quality 2 for HLS because quality 0/auto can return an
-            # empty playlist on isa.camera.hlc6 even if YAML still has quality: 0.
-            hls = await self._call_miot_action(5, 1, [HLS_STREAM_QUALITY])
-            if hls.get("code") == 0 and hls.get("out"):
-                self._hls_url = hls["out"][0]
-                _LOGGER.debug("Obtained HLS URL for %s", self.name)
-            else:
-                _LOGGER.debug("HLS action failed/empty for %s: %s", self.name, hls)
-        else:
+        if not self._enable_stream:
+            # In privacy-first mode, do not call either Alexa RTSP or Google HLS
+            # stream actions: both are stream-start actions and can make Xiaomi
+            # Home notify that someone is watching. The Alexa "snapshot" output
+            # is only a generic Works with Mi Home placeholder on isa.camera.hlc6.
             self._hls_url = None
+            self._rtsp_url = None
+            self._snapshot_url = None
+            self._expires_at = now + timedelta(seconds=SNAPSHOT_CACHE_SECONDS)
+            return
+
+        # HLS / Google stream: siid=5 aiid=1 input [quality], output [url].
+        # Always request quality 2 for HLS because quality 0/auto can return an
+        # empty playlist on isa.camera.hlc6 even if YAML still has quality: 0.
+        hls = await self._call_miot_action(5, 1, [HLS_STREAM_QUALITY])
+        if hls.get("code") == 0 and hls.get("out"):
+            self._hls_url = hls["out"][0]
+            _LOGGER.debug("Obtained HLS URL for %s", self.name)
+        else:
+            _LOGGER.debug("HLS action failed/empty for %s: %s", self.name, hls)
 
         # RTSP / Alexa stream: siid=4 aiid=1 input [quality], output [rtsp, snapshot, expiration_ms].
         rtsp = await self._call_miot_action(4, 1, [self._quality])
@@ -149,6 +174,64 @@ class XiaomiHlc6MiotCamera(Camera):
             _LOGGER.warning("RTSP action failed/empty for %s: %s", self.name, rtsp)
             self._expires_at = now + timedelta(seconds=20)
 
+    async def _async_hls_frame_image(self) -> bytes | None:
+        """Capture one JPEG frame from the HLS stream when explicitly enabled."""
+        now = datetime.utcnow()
+        if (
+            self._last_image
+            and self._last_image_at
+            and now < self._last_image_at + timedelta(seconds=SNAPSHOT_CACHE_SECONDS)
+        ):
+            return self._last_image
+
+        hls = await self._call_miot_action(5, 1, [HLS_STREAM_QUALITY])
+        if hls.get("code") != 0 or not hls.get("out"):
+            _LOGGER.warning("HLS action failed/empty for frame snapshot on %s: %s", self.name, hls)
+            return None
+
+        hls_url = hls["out"][0]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                hls_url,
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            _LOGGER.warning("ffmpeg is not installed; cannot capture HLS frame snapshot for %s", self.name)
+            return None
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            _LOGGER.warning("Timed out capturing HLS frame snapshot for %s", self.name)
+            return None
+
+        if proc.returncode != 0 or not stdout:
+            _LOGGER.warning(
+                "ffmpeg failed capturing HLS frame snapshot for %s: rc=%s stderr=%s",
+                self.name,
+                proc.returncode,
+                stderr.decode(errors="ignore")[:500],
+            )
+            return None
+
+        self._last_image = stdout
+        self._last_image_at = now
+        return stdout
+
     async def stream_source(self) -> str | None:
         """Return a stream URL for Home Assistant stream integration."""
         if not self._enable_stream:
@@ -162,8 +245,14 @@ class XiaomiHlc6MiotCamera(Camera):
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         """Return latest snapshot bytes."""
+        if self._enable_stream_snapshot:
+            return await self._async_hls_frame_image()
+
         await self._refresh_urls()
         if not self._snapshot_url:
+            return None
+        if any(marker in self._snapshot_url for marker in PLACEHOLDER_SNAPSHOT_MARKERS):
+            _LOGGER.debug("Ignoring generic Xiaomi placeholder snapshot for %s", self.name)
             return None
         session = async_get_clientsession(self.hass)
         try:
