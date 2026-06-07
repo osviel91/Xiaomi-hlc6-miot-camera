@@ -25,7 +25,11 @@ CONF_QUALITY = "quality"
 CONF_ENABLE_STREAM = "enable_stream"
 
 DEFAULT_NAME = "Xiaomi HLC6 Camera"
-DEFAULT_QUALITY = 0  # 0 Auto, 1 1080p, 2 640x360
+# For isa.camera.hlc6, quality 0/auto can produce an empty HLS playlist and
+# RTSP fails in Home Assistant's stream worker. Quality 2 returns a valid H.264
+# HLS stream in observed tests.
+DEFAULT_QUALITY = 2  # 0 Auto, 1 1080p, 2 640x360
+HLS_STREAM_QUALITY = 2
 
 PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
     {
@@ -114,7 +118,9 @@ class XiaomiHlc6MiotCamera(Camera):
             return
 
         # HLS / Google stream: siid=5 aiid=1 input [quality], output [url].
-        hls = await self._call_miot_action(5, 1, [self._quality])
+        # Always request quality 2 for HLS because quality 0/auto can return an
+        # empty playlist on isa.camera.hlc6 even if YAML still has quality: 0.
+        hls = await self._call_miot_action(5, 1, [HLS_STREAM_QUALITY])
         if hls.get("code") == 0 and hls.get("out"):
             self._hls_url = hls["out"][0]
             _LOGGER.debug("Obtained HLS URL for %s", self.name)
@@ -141,9 +147,11 @@ class XiaomiHlc6MiotCamera(Camera):
         if not self._enable_stream:
             return None
         await self._refresh_urls()
-        # In tests HLS returned 404 from outside HA, while RTSP returned a URL.
-        # Prefer RTSP for HA/FFmpeg, fall back to HLS.
-        return self._rtsp_url or self._hls_url
+        # Direct tests showed the HLS action with quality=2 returns a valid H.264
+        # playlist, while the RTSP URL opens as a black/broken stream in Home
+        # Assistant/FFmpeg. Prefer HLS for playback and keep RTSP only because it
+        # also provides the snapshot URL used by async_camera_image().
+        return self._hls_url or self._rtsp_url
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         """Return latest snapshot bytes."""

@@ -1,8 +1,8 @@
 {
   "domain": "xiaomi_hlc6_miot",
   "name": "Xiaomi HLC6 Miot Camera",
-  "version": "0.1.0",
-  "documentation": "https://github.com/local/xiaomi_hlc6_miot",
+  "version": "0.1.1",
+  "documentation": "https://github.com/osviel91/Xiaomi-hlc6-miot-camera",
   "requirements": [],
   "dependencies": ["camera", "xiaomi_miot"],
   "codeowners": [],
